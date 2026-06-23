@@ -16,6 +16,7 @@ public class AdVO {
 
     public AdVO() {}
 
+    //Bug 23: Utilización de una gran cantidad de parametros
     public AdVO(Integer id, String typology, String description, List<Integer> pictures, Integer houseSize, Integer gardenSize, Integer score, Date irrelevantSince) {
         this.id = id;
         this.typology = typology;

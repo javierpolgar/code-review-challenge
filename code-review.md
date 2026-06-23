@@ -50,7 +50,7 @@ com.idealista
 
 `Ad` sería un `AggregateRoot<AdId>` con `recalculateScore()` dentro. `Score`, `AdId` y `PictureId` serían Value Objects. Cada caso de uso tendría su propio service con un único `execute()`. `InMemoryPersistence` desaparece y `AdRepositoryAdapter` implementa `AdRepository` usando JPA.
 
-### Testing
+## Testing
 
 El código prácticamente no está testeado. Hay un único test unitario que como ya comento en el Bug 7 no verifica nada de negocio, y no existe ningún test de integración. Cualquier cambio en la lógica de scoring podría romper el comportamiento esperado sin que ningún test lo detecte.
 
@@ -63,6 +63,155 @@ Lo mínimo que yo exigiría en un proyecto así:
 **Tests de mutación** con PIT o similar. La cobertura de líneas al 100% no garantiza que los tests sean buenos, un mutante puede sobrevivir aunque todas las líneas se ejecuten. Los tests de mutación detectan esos huecos y obligan a escribir assertions más precisos.
 
 **Tests E2E** que arranquen la aplicación completa y ejerciten los endpoints reales, validando tanto el happy path como los casos de error (anuncio sin fotos, descripción vacía, tipología desconocida...).
+
+## Excepciones:
+
+Este es un punto en el que se debe resaltar para mejorar el código ya que casi no se utiliza y si se llega a utilizar no se están manejando bien.
+
+### Jerarquía básica
+
+```
+Throwable
+├── Error            — problemas de la JVM (OutOfMemoryError), nunca capturar
+└── Exception
+    ├── RuntimeException (unchecked) — no obliga a declararse ni capturarse
+    │   ├── IllegalArgumentException
+    │   ├── IllegalStateException
+    │   ├── NullPointerException
+    │   └── ...
+    └── Checked exceptions — el compilador obliga a declarar o capturar
+        ├── IOException
+        ├── SQLException
+        └── ...
+```
+
+### Cuándo usar cada una
+
+**`IllegalArgumentException`:** cuando el argumento que recibe el método es inválido. Es culpa del llamador.
+
+```java
+// En Bug 13 — Typology.valueOf() lanza IllegalArgumentException
+// si el String no corresponde a ningún valor del enum.
+// Lo correcto sería envolverlo con contexto:
+try {
+    return Typology.valueOf(adVO.getTypology());
+} catch (IllegalArgumentException e) {
+    throw new IllegalArgumentException(
+        "Tipología inválida '" + adVO.getTypology() + "' en anuncio id=" + adVO.getId(), e);
+}
+```
+
+**`IllegalStateException`:** cuando el estado interno del objeto es inconsistente para la operación que se intenta. No es culpa del argumento, es culpa del estado.
+
+```java
+// En Bug 8 — una foto referenciada por un anuncio no existe en el repositorio.
+// No es un argumento inválido, es que el sistema está en un estado roto.
+.orElseThrow(() -> new IllegalStateException("Picture not found: " + pictureId));
+```
+
+**Excepciones de dominio propias:** lo más limpio es crear tu propia jerarquía:
+
+```java
+public class DomainException extends RuntimeException { ... }
+public class AdNotFoundException extends DomainException { ... }
+public class InvalidScoreException extends DomainException { ... }
+```
+Todas `RuntimeException` para que Spring las trate como rollback automático, ya que en excepciones como `IOException`Spring no hace rollback.
+
+## Single Responsibility Principle
+
+### El problema en `calculateScore`
+
+El método `calculateScore` en `AdsServiceImpl` hace siete cosas distintas:
+
+1. Calcular puntos por fotos (y distinguir HD vs SD).
+2. Calcular puntos por tener descripción.
+3. Calcular puntos por número de palabras (con lógica diferente por tipología).
+4. Calcular puntos por palabras clave.
+5. Calcular puntos por completitud.
+6. Aplicar clamping (0–100).
+7. Determinar si el anuncio es irrelevante y actualizar `irrelevantSince`.
+
+Todos estos puntos yo los distribuiría en el Domain Ad como:
+```java
+// Dominio - Ad.java
+public void recalculateScore() {
+    int score = calculatePhotoScore()
+              + calculateDescriptionScore()
+              + calculateCompletenessScore();
+    this.score = Math.max(0, Math.min(100, score));
+    updateIrrelevance();
+}
+
+private int calculatePhotoScore() { ... }
+private int calculateDescriptionScore() { ... }
+private int calculateCompletenessScore() { ... }
+private void updateIrrelevance() { ... }
+```
+
+También podríamos plantearnos si usar elSRP a nivel de clase.
+
+Para cambiar de clase tendriamos que plantearnos: 
+- SI cambian las reglas de scoring (lógica de dominio).
+- SI cambia cómo se persisten los anuncios (infraestructura).
+- SI cambia el formato de los DTOs.
+
+## Persistencia
+
+En éste código como ya hemos planteado antes, utiliza `InMemoryPersistence`
+
+Tenemos el problema que harcodea los ID, por lo que vamos a ver diferentes maneras de persistir estos ID:
+
+#### SQL CON SEQUENCE / AUTO_INCREMENT
+Ventaja: la BD garantiza unicidad. Inconveniente: no conoces el ID hasta después del INSERT, lo que complica los domain events y los sistemas event-driven.
+
+#### EL DOMINIO (UUID)
+Útil para arquitecturas event-driven (Kafka). Inconveniente: los UUIDs son más grandes (128 bits vs 32/64 bits de un int) e impactan el rendimiento de los índices en BD.
+
+## BASE DE DATOS QUE PODRIAMOS UTILIZAR
+### SQL O MONGO??
+
+### SQL (relacional)
+
+- Los IDs numéricos se generan con SEQUENCE y se asignan en el INSERT.
+- Con JPA: `@GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "ad_seq")`
+- Las transacciones son ACID garantizadas.
+- Los joins entre `Ad` y `Picture` son triviales con foreign keys.
+- El riesgo de insert concurrente con IDs duplicados lo gestiona la BD con locks.
+
+```java
+@Entity
+@Table(name = "ads")
+public class AdEntity {
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "ad_seq")
+    @SequenceGenerator(name = "ad_seq", sequenceName = "SEQ_ADS", allocationSize = 1)
+    private Long id;
+    // ...
+}
+```
+
+### MongoDB (no relacional)
+
+- Los IDs son `ObjectId` por defecto (12 bytes, incluyen timestamp y contador).
+- También puedes usar `UUID` como `_id`.
+- No hay transacciones multi-documento hasta MongoDB 4.0+ (y tienen limitaciones de rendimiento).
+- Si `Ad` y `Picture` son documentos separados, una foto referenciada por un anuncio que no existe no produce un error en BD — tendrías que verificarlo en aplicación.
+- Ventaja: `Ad` con sus fotos puede modelarse como un documento embebido, sin joins.
+
+```json
+{
+  "_id": "507f1f77bcf86cd799439011",
+  "typology": "FLAT",
+  "description": "...",
+  "pictures": [
+    { "url": "http://...", "quality": "HD" }
+  ]
+}
+```
+
+
+
 
 ---
 
@@ -179,30 +328,22 @@ Las reglas de cuánto vale una foto, qué palabras suman puntos o qué hace a un
 
 ---
 
-### Bug 12 — Código de mapeo duplicado y oportunidad de herencia entre DTOs
+### Bug 12 — Código de mapeo duplicado entre DTOs
 **Localización:** `AdsServiceImpl#findPublicAds` y `#findQualityAds`
 
 El mapeo de `Ad` a DTO es prácticamente idéntico en los dos métodos. Si se añade un campo hay que tocarlo en dos sitios.
 
-Pero hay algo más de fondo: `PublicAd` y `QualityAd` comparten exactamente los mismos campos (`id`, `typology`, `description`, `pictureUrls`, `houseSize`, `gardenSize`) y `QualityAd` simplemente añade `score` e `irrelevantSince`. `QualityAd` ES un `PublicAd` con información extra, que es exactamente para lo que sirve la herencia:
+`PublicAd` y `QualityAd` comparten exactamente los mismos campos (`id`, `typology`, `description`, `pictureUrls`, `houseSize`, `gardenSize`) y `QualityAd` simplemente añade `score` e `irrelevantSince`. La primera intuición sería usar herencia, pero para DTOs la solución correcta es **composición**: `QualityAd` **tiene un** `PublicAd`, en vez de **ser un** `PublicAd`.
 
 ```java
-public class PublicAd {
-    private Integer id;
-    private String typology;
-    private String description;
-    private List<String> pictureUrls;
-    private Integer houseSize;
-    private Integer gardenSize;
-}
-
-public class QualityAd extends PublicAd {
+public class QualityAd {
+    private PublicAd data;
     private Integer score;
-    private Date irrelevantSince;
+    private Instant irrelevantSince;
 }
 ```
 
-Esto elimina la duplicación de forma natural y expresa mejor la relación entre los dos conceptos. Con MapStruct encima el mapeo quedaría en unas pocas líneas.
+**Fix:** usar composición en `QualityAd` y eliminar la duplicación del mapeo con MapStruct, que en unas pocas líneas construye ambos DTOs desde el mismo objeto `Ad`.
 
 ---
 
@@ -285,3 +426,40 @@ Cada vez que se guarda un anuncio se re-persisten todas sus fotos como efecto se
 **Localización:** `AdsServiceImpl` (líneas 4-5)
 
 `AdsServiceImpl` importa `PublicAd` y `QualityAd` de `infrastructure.api`. La dirección correcta es `Infrastructure → Application → Domain`, no al revés. El mapeo a DTOs de API debería hacerlo el controller, no el servicio de aplicación.
+
+### Bug 23 - Utilización de una gran cantidad de parametros
+**Localización:** `AdVO` (línea 20)
+
+Robert C. Martin en Clean Code:
+
+- **0 parámetros (niladic):** ideal.
+- **1 parámetro (monadic):** muy bien.
+- **2 parámetros (dyadic):** aceptable.
+- **3 parámetros (triadic):** justificable si hay una razón sólida.
+- **Más de 3:** refactorizar.
+
+En este caso la solición sería utilizar Builders
+
+**Builder pattern:**
+
+```java
+Ad ad = Ad.builder()
+    .id(1)
+    .typology(Typology.FLAT)
+    .description("...")
+    .houseSize(100)
+    .build();
+```
+
+Lombok lo genera con `@Builder`. Los parámetros obligatorios se pueden marcar con `@NonNull` y Lombok lanzará `NullPointerException` inmediatamente si se omiten.
+
+O también factorías con nombre:
+
+```java
+// Para el dominio rico
+Ad ad = Ad.createFlat(id, description, pictures, houseSize);
+Ad ad = Ad.createChalet(id, description, pictures, houseSize, gardenSize);
+Ad ad = Ad.createGarage(id, pictures);
+```
+
+Cada tipología tiene sus propios campos obligatorios, y el compilador lo verifica.
