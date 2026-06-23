@@ -13,6 +13,7 @@ public class Ad {
     private Integer houseSize;
     private Integer gardenSize;
     private Integer score;
+    //Bug 15: Uso de date, esta obsoleto desde Java 8 y se usa instant
     private Date irrelevantSince;
 
     public Ad(Integer id,
@@ -47,6 +48,10 @@ public class Ad {
         this.gardenSize = gardenSize;
     }
 
+
+    //Bug 19: Imposible de leer
+    //Fix: Meter la logica en el Enum
+    //Un metodo booleando garageIsComplete y flatIsComplete
     public boolean isComplete() {
         return (Typology.GARAGE.equals(typology) && !pictures.isEmpty())
                 || (Typology.FLAT.equals(typology) && !pictures.isEmpty() && description != null && !description.isEmpty() && houseSize != null)
@@ -77,6 +82,9 @@ public class Ad {
         this.description = description;
     }
 
+    //Bug 16: Expone la lista de fotos, cualquier codigo excterno podria modificar Picture
+    //ad.getPictures().clear();
+    //Esto rompe la encapsulación del dominio
     public List<Picture> getPictures() {
         return pictures;
     }

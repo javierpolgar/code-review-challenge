@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Repository
+//Bug 14: Y el problema que tiene alguno de los otros bugs es el problema de como se hacer la persistencia
+//mapeo manual, orElse(null), datos hardcodeados en el constructor — desaparecen si usas H2 + JPA
 public class InMemoryPersistence implements AdRepository {
 
     private List<AdVO> ads;
@@ -49,7 +51,7 @@ public class InMemoryPersistence implements AdRepository {
     public void save(Ad ad) {
         ads.removeIf(x -> x.getId().equals(ad.getId()));
         ads.add(mapToPersistence(ad));
-
+        //Bug 21: Guarda aunque nada haya cambiado
         ad.getPictures()
             .forEach(this::save);
     }
@@ -63,6 +65,8 @@ public class InMemoryPersistence implements AdRepository {
     public List<Ad> findRelevantAds() {
         return ads
                 .stream()
+                //bug 3: esto da un nullpoint ya que intenta comparar null >= 40
+                //fix: .filter(x -> x.getScore() != null && x.getScore() >= Constants.FORTY)
                 .filter(x -> x.getScore() >= Constants.FORTY)
                 .map(this::mapToDomain)
                 .collect(Collectors.toList());
@@ -79,6 +83,8 @@ public class InMemoryPersistence implements AdRepository {
 
     private Ad mapToDomain(AdVO adVO) {
         return new Ad(adVO.getId(),
+                //Bug 13: Lanzaria IllegalArgumentException si el String es invalido, lo mismo en el mapToDamain de Picture
+                //FIx: veo uno inmediato, un manejo de errores y otro de raiz, AdVO y PictureVO deberia usar directamente enums
                 Typology.valueOf(adVO.getTypology()),
                 adVO.getDescription(),
                 adVO.getPictures().stream().map(this::mapToDomain).collect(Collectors.toList()),
@@ -88,6 +94,9 @@ public class InMemoryPersistence implements AdRepository {
                 adVO.getIrrelevantSince());
     }
 
+    //Bug 8: Puede haber nulls en la lista de fotos
+    //FIX: Filtra el null antes de que entre en la lista o
+    // controla el error: .orElseThrow(() -> new IllegalStateException("Picture not found: " + pictureId))
     private Picture mapToDomain(Integer pictureId) {
         return pictures
                 .stream()

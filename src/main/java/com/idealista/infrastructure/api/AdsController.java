@@ -9,8 +9,11 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
+
 public class AdsController {
 
+    //Bug 10: Inyección de dependencias on Autowired
+    //Fix: Usar lombok con el @RequiredArgsConstructor
     @Autowired
     private AdsService adsService;
 
@@ -24,9 +27,11 @@ public class AdsController {
         return ResponseEntity.ok(adsService.findPublicAds());
     }
 
+    //Bug 6: Está modificando el estado del score y utiliza un Get
     @GetMapping("/ads/score")
     public ResponseEntity<Void> calculateScore() {
         adsService.calculateScores();
+        //Además devuelve un 202, Accepted, cuando se suele utilizar para operaciones asincronas, lo suyo ess un 204 o un 200
         return ResponseEntity.accepted().build();
     }
 }

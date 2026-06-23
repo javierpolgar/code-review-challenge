@@ -22,11 +22,14 @@ class AdsServiceImplTest {
     @InjectMocks
     private AdsServiceImpl scoreService;
 
+    //Bug 7: Los 2 metodos privados que construyen el Ad tienen id=1, lo que hace que InMemoryPersistence.save() machaque el primero
+    //removeIf(x -> x.getId().equals(ad.getId()))
     @Test
     public void calculateScoresTest() {
         when(adRepository.findAllAds()).thenReturn(Arrays.asList(irrelevantAd(), relevantAd()));
         scoreService.calculateScores();
         verify(adRepository).findAllAds();
+        //No comprueba ninguna logica de negocio, solo verifica que ha llamado al metodo save 2 veces
         verify(adRepository, times(2)).save(any());
     }
 
