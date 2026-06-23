@@ -50,6 +50,20 @@ com.idealista
 
 `Ad` sería un `AggregateRoot<AdId>` con `recalculateScore()` dentro. `Score`, `AdId` y `PictureId` serían Value Objects. Cada caso de uso tendría su propio service con un único `execute()`. `InMemoryPersistence` desaparece y `AdRepositoryAdapter` implementa `AdRepository` usando JPA.
 
+### Testing
+
+El código prácticamente no está testeado. Hay un único test unitario que como ya comento en el Bug 7 no verifica nada de negocio, y no existe ningún test de integración. Cualquier cambio en la lógica de scoring podría romper el comportamiento esperado sin que ningún test lo detecte.
+
+Lo mínimo que yo exigiría en un proyecto así:
+
+**Tests unitarios** con cobertura al 100%. Cada regla de puntuación testeada de forma aislada: que una foto HD suma 20, que sin fotos resta 10, que "Luminoso" suma 5, que un anuncio completo suma 40 encima de lo que ya tiene, etc. Si la lógica de scoring estuviera en el dominio como debería, estos tests serían triviales de escribir sin Spring ni mocks.
+
+**Tests de integración** cubriendo todas las clases al 100%, verificando que el flujo completo funciona: desde la llamada al endpoint hasta la persistencia y la respuesta. Los tests de integración que he añadido en este repo son un punto de partida, pero habría que ampliarlos considerablemente una vez se corrijan los bugs.
+
+**Tests de mutación** con PIT o similar. La cobertura de líneas al 100% no garantiza que los tests sean buenos, un mutante puede sobrevivir aunque todas las líneas se ejecuten. Los tests de mutación detectan esos huecos y obligan a escribir assertions más precisos.
+
+**Tests E2E** que arranquen la aplicación completa y ejerciten los endpoints reales, validando tanto el happy path como los casos de error (anuncio sin fotos, descripción vacía, tipología desconocida...).
+
 ---
 
 ## Bugs funcionales críticos
@@ -165,12 +179,30 @@ Las reglas de cuánto vale una foto, qué palabras suman puntos o qué hace a un
 
 ---
 
-### Bug 12 — Código de mapeo duplicado
+### Bug 12 — Código de mapeo duplicado y oportunidad de herencia entre DTOs
 **Localización:** `AdsServiceImpl#findPublicAds` y `#findQualityAds`
 
 El mapeo de `Ad` a DTO es prácticamente idéntico en los dos métodos. Si se añade un campo hay que tocarlo en dos sitios.
 
-**Fix:** Métodos privados `toPublicAd(Ad)` y `toQualityAd(Ad)`, o directamente MapStruct.
+Pero hay algo más de fondo: `PublicAd` y `QualityAd` comparten exactamente los mismos campos (`id`, `typology`, `description`, `pictureUrls`, `houseSize`, `gardenSize`) y `QualityAd` simplemente añade `score` e `irrelevantSince`. `QualityAd` ES un `PublicAd` con información extra, que es exactamente para lo que sirve la herencia:
+
+```java
+public class PublicAd {
+    private Integer id;
+    private String typology;
+    private String description;
+    private List<String> pictureUrls;
+    private Integer houseSize;
+    private Integer gardenSize;
+}
+
+public class QualityAd extends PublicAd {
+    private Integer score;
+    private Date irrelevantSince;
+}
+```
+
+Esto elimina la duplicación de forma natural y expresa mejor la relación entre los dos conceptos. Con MapStruct encima el mapeo quedaría en unas pocas líneas.
 
 ---
 
