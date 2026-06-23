@@ -50,6 +50,8 @@ com.idealista
 
 `Ad` sería un `AggregateRoot<AdId>` con `recalculateScore()` dentro. `Score`, `AdId` y `PictureId` serían Value Objects. Cada caso de uso tendría su propio service con un único `execute()`. `InMemoryPersistence` desaparece y `AdRepositoryAdapter` implementa `AdRepository` usando JPA.
 
+---
+
 ## Testing
 
 El código prácticamente no está testeado. Hay un único test unitario que como ya comento en el Bug 7 no verifica nada de negocio, y no existe ningún test de integración. Cualquier cambio en la lógica de scoring podría romper el comportamiento esperado sin que ningún test lo detecte.
@@ -63,6 +65,8 @@ Lo mínimo que yo exigiría en un proyecto así:
 **Tests de mutación** con PIT o similar. La cobertura de líneas al 100% no garantiza que los tests sean buenos, un mutante puede sobrevivir aunque todas las líneas se ejecuten. Los tests de mutación detectan esos huecos y obligan a escribir assertions más precisos.
 
 **Tests E2E** que arranquen la aplicación completa y ejerciten los endpoints reales, validando tanto el happy path como los casos de error (anuncio sin fotos, descripción vacía, tipología desconocida...).
+
+---
 
 ## Excepciones:
 
@@ -118,6 +122,7 @@ public class InvalidScoreException extends DomainException { ... }
 ```
 Todas `RuntimeException` para que Spring las trate como rollback automático, ya que en excepciones como `IOException`Spring no hace rollback.
 
+---
 ## Single Responsibility Principle
 
 ### El problema en `calculateScore`
@@ -156,6 +161,7 @@ Para cambiar de clase tendriamos que plantearnos:
 - SI cambia cómo se persisten los anuncios (infraestructura).
 - SI cambia el formato de los DTOs.
 
+---
 ## Persistencia
 
 En éste código como ya hemos planteado antes, utiliza `InMemoryPersistence`
@@ -168,8 +174,7 @@ Ventaja: la BD garantiza unicidad. Inconveniente: no conoces el ID hasta despué
 #### EL DOMINIO (UUID)
 Útil para arquitecturas event-driven (Kafka). Inconveniente: los UUIDs son más grandes (128 bits vs 32/64 bits de un int) e impactan el rendimiento de los índices en BD.
 
-## BASE DE DATOS QUE PODRIAMOS UTILIZAR
-### SQL O MONGO??
+### BASE DE DATOS QUE PODRIAMOS UTILIZAR, SQL O MONGO??
 
 ### SQL (relacional)
 
@@ -209,6 +214,102 @@ public class AdEntity {
   ]
 }
 ```
+
+---
+## Seguridad de endpoints
+
+### El problema del endpoint sin protección
+
+`GET /ads/score` no tiene ninguna forma de autenticación. Cualquiera que sepa la URL podría desencadenar una llamada de recalculaciones de score masivas
+
+### Capa 1: autenticación con tokens
+
+Lo mínimo es un Bearer token en el header:
+
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+```
+
+Spring Security con JWT valida el token en cada petición. Si no es válido, devuelve 401.
+
+### Capa 2: el problema de las apps móviles
+
+Si el token está hardcodeado en la app móvil (Android/iOS), cualquiera puede:
+
+1. Hacer ingeniería inversa.
+2. Extraer el token del binario.
+3. Hacer llamadas masivas al API haciéndose pasar por la app.
+
+La solución no es solo el token, sino **firmar las peticiones** con un secreto que no viaja en el request. El mecanismo más común es HMAC.
+
+
+### Capa 3: rate limiting
+
+Limitar cuántas veces puede llamar una IP o usuario por ventana de tiempo:
+
+```java
+// Con Bucket4j + Spring
+@GetMapping("/ads/score")
+@RateLimiter(name = "calculateScore") // max 5 req/min por IP
+public ResponseEntity<Void> calculateScore() { ... }
+```
+
+### Validación de entrada (`@Valid`)
+
+Todos los endpoints que reciben datos deberían tener `@Valid` en el parámetro del body y las restricciones en el DTO:
+
+```java
+public class CreateAdRequest {
+    @NotNull
+    @Min(0)
+    private Integer houseSize;
+    
+    @NotBlank
+    @Size(max = 2000)
+    private String description;
+}
+
+@PostMapping("/ads")
+public ResponseEntity<Void> create(@Valid @RequestBody CreateAdRequest request) { ... }
+```
+
+Sin `@Valid`, todos los valores llegan sin verificar y los NPEs aparecen más tarde y más difíciles de rastrear.
+
+---
+
+## Posible uso de Kafka y domain events
+
+### Cuándo tiene sentido
+
+Si el sistema necesita notificar a otros servicios cuando un anuncio cambia de estado (pasa a irrelevante, se publica, etc.), un modelo basado en eventos es más robusto que llamadas directas entre servicios.
+
+### Domain Events
+
+El agregado registra el evento en memoria. La capa de aplicación lo publica al finalizar la transacción:
+
+```java
+// En Ad.java
+public void recalculateScore(int newScore) {
+    this.score = newScore;
+    if (this.score < 40 && this.irrelevantSince == null) {
+        this.irrelevantSince = Instant.now();
+        registerEvent(new AdBecameIrrelevantEvent(this.id, this.irrelevantSince));
+    }
+}
+```
+
+```java
+// En CalculateScoresService.java
+@Transactional
+public void calculateScores() {
+    List<Ad> ads = adRepository.findAllAds();
+    ads.forEach(Ad::recalculateScore);
+    ads.forEach(adRepository::save);
+    ads.forEach(ad -> ad.getDomainEvents().forEach(eventPublisher::publish));
+}
+```
+
+El evento se publica después del commit para garantizar que no se emite un evento de un cambio que luego hizo rollback.
 
 
 
@@ -427,6 +528,7 @@ Cada vez que se guarda un anuncio se re-persisten todas sus fotos como efecto se
 
 `AdsServiceImpl` importa `PublicAd` y `QualityAd` de `infrastructure.api`. La dirección correcta es `Infrastructure → Application → Domain`, no al revés. El mapeo a DTOs de API debería hacerlo el controller, no el servicio de aplicación.
 
+---
 ### Bug 23 - Utilización de una gran cantidad de parametros
 **Localización:** `AdVO` (línea 20)
 
